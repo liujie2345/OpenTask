@@ -1,67 +1,80 @@
 ﻿---
 name: opentask
-description: Task persistence workflow for OpenCode. Use when the user says CreateTask, OpenTask, ArchiveTask, RecordTask, 新建/继续/打开/完成/归档 task, 记一下, 保存当前进度, 更新进度, 设置记录密度, 打开或关闭自动追踪, asks what they were doing last time, mentions historical work under E:\Task\, or wants a development task remembered across OpenCode conversations.
+description: Task persistence workflow for OpenCode, backed by the opentask MCP server. Use when the user says CreateTask, OpenTask, ArchiveTask, RecordTask, SearchTask, PauseTask, ResumeTask, LinkTask, KnowledgeAdd, KnowledgeSearch, 新建/继续/打开/完成/归档/暂停/恢复/搜索/关联 task, 父子任务, 挂起任务, 查一下任务, 存入知识库, 查知识库, 记一条知识, 记一下, 保存当前进度, 更新进度, 设置记录密度, 打开或关闭自动追踪, asks what they were doing last time, mentions historical work under E:\Task\ or ~/Documents/Task, or wants a development task remembered across OpenCode conversations.
 ---
 
 # OpenTask
 
 Persist development-task context on disk so future OpenCode conversations can resume work by reading files instead of relying on chat memory.
 
-OpenTask stores all state under a task root, defaulting to `E:\Task`. Each task is a directory named `YYYYMMDD-<name>` and contains:
+**Runtime**: OpenTask is driven by the `opentask` MCP server (repo `server/`, registered in the opencode global config as `mcp.opentask`). The server owns every mechanical operation: config, the `tasks.json` index, `INDEX.md` rendering, task lifecycle transitions, log archival, and the knowledge base. The model writes prose files (`progress.md`, `changes.md`, `decisions.md`, `next.md`, `memory.md`) directly and calls server tools to keep state consistent. If the opentask tools are missing, tell the user to restart opencode and check the global config.
+
+OpenTask stores all state under a task root, defaulting to `E:\Task` on Windows and `~/Documents/Task` on macOS/Linux. Each task is a directory named `YYYYMMDD-<name>` and contains:
 
 ```text
-README.md     task card: goal, status, current focus, resume guide
+README.md     task card: goal, status, parent, tags, current focus, resume guide
 progress.md   chronological progress log, append-only
 changes.md    file-change ledger, append-only table
 decisions.md  key decisions, append-only
 next.md       next actions; rewrite as needed, preserving unresolved work
-archive\      drafts, references, temporary material
+memory.md     key facts and learnings, deduplicated, bounded
+archive       drafts, references, temporary material, archived log segments
 ```
 
 Global files at the task root:
 
 ```text
-_config.json  active task and tracking settings
-INDEX.md      task index grouped by status
+_config.json  active task, tracking settings, log archive threshold (managed by the server)
+tasks.json    machine-readable task index: hierarchy, status, tags (managed by the server)
+INDEX.md      human-readable index rendered from tasks.json (managed by the server)
+_knowledge\   global knowledge base entries (KB-YYYYMMDD-<slug>.md)
 ```
 
 ## First Rule
 
-Before any OpenTask command, read `<task_root>\_config.json`. If it does not exist, create `E:\Task`, copy `templates/_config.json` and `templates/INDEX.md` into it, then read the config. Use `task_root` from config after that, unless the user explicitly changes it.
+Before any OpenTask command, call the `init` tool (or `config_get` if the root is already known). It ensures the task root exists — creating the directory and copying `_config.json` / `tasks.json` / `INDEX.md` from `templates/` on first use — and returns the effective config.
 
-Normalize old config files:
+Resolve `task_root` in this order:
 
-```json
-{
-  "task_root": "E:\\Task",
-  "active_task": "",
-  "auto_track_changes": true,
-  "change_log_level": "feature",
-  "auto_update_progress": true
-}
-```
+1. An explicit path the user gives in the current conversation takes precedence over everything. Pass it as the `root` parameter on every tool call while it applies.
+2. A non-empty `task_root` in `_config.json` is used as-is.
+3. An empty `task_root` (`""`, the template default) resolves at read time to the platform default — the server never writes the resolved path back:
+   - Windows (`win32`): `E:\Task`
+   - macOS / Linux: `$HOME/Documents/Task`
 
-If `change_log_level` is missing, infer it from `auto_track_changes`: `true` means `feature`, `false` means `manual`. Add the missing field the next time the config is written.
+Config normalization is handled entirely by the server (v2 shape, `change_log_level` inference from `auto_track_changes`, legacy `E:\Task` rewrite on non-Windows). Do not hand-edit `_config.json`; use `config_get` / `config_set`.
+
+## Task Index
+
+- `tasks.json` is the single query source for tasks. It is maintained **exclusively by server tools** (`task_create`, `task_open`, `task_status`, `task_archive`, `task_link`, `task_refresh`) — never hand-edit it.
+- `INDEX.md` is re-rendered by the server on every index write; never hand-edit it either.
+- `status` is one of `active` (`🟡 进行中`), `paused` (`⏸ 暂停`), `done` (`✅ 已完成`). Hierarchy (`parent` / `children`) lives only in the index: the filesystem layout stays flat (`YYYYMMDD-*` directly under `task_root`).
+- Call `index_rebuild` when the index is missing or visibly stale (the server also auto-rebuilds on a stale version). It scans the task root, reads README fields (`**状态**`, `## 目标` first line, `**父任务**`, `**标签**`), and preserves known hierarchy where possible.
 
 ## Commands
 
-### CreateTask `<name>`
+Command-to-tool map:
+
+| Command | MCP tools |
+|---|---|
+| CreateTask | `task_create`, `task_refresh` |
+| OpenTask | `task_find`, `task_open` |
+| RecordTask | `task_refresh`, `task_log_archive`, `knowledge_add` |
+| ArchiveTask | `task_archive`, `knowledge_add` |
+| PauseTask / ResumeTask | `task_status` |
+| SearchTask | `task_find` |
+| LinkTask | `task_link` |
+| KnowledgeAdd / KnowledgeSearch | `knowledge_add`, `knowledge_search` |
+| Tracking Settings | `config_set` |
+
+### CreateTask `<name> [tags...]`
 
 Use for `CreateTask`, `新建 task`, `创建任务`, `开个任务`, or similar.
 
-1. Require a user-provided name. If missing, ask for it.
-2. Read config.
-3. Create a task directory under `task_root` named `YYYYMMDD-<name>`, using the local current date. If it already exists, append `-2`, `-3`, etc.
-4. Create `archive\`.
-5. Copy the five task templates from `templates/`: `README.md`, `progress.md`, `changes.md`, `decisions.md`, `next.md`.
-6. Replace placeholders:
-   - `{{TASK_ID}}`: full directory name
-   - `{{TASK_NAME}}`: user-provided name
-   - `{{CREATED_DATE}}`: local date, `YYYY-MM-DD`
-   - `{{GOAL}}`: use `<待补充>` if the user has not supplied a goal yet
-7. Update `_config.json.active_task` to the new directory name.
-8. Add the task to the `🟡 进行中` section in `INDEX.md` and update the index timestamp.
-9. Report the task path. If the goal is still unknown, ask for a concise goal and, after the user answers, write it into `README.md`.
+1. Require a user-provided name. If missing, ask for it. Optional space-separated tags (e.g. `CreateTask 部署脚本 infra deploy`) are passed through.
+2. Call `task_create` with `name`, `tags`, and `goal` if the user supplied one.
+3. If the goal is still unknown, ask for a concise goal, then call `task_refresh` with the goal so README and index stay in sync.
+4. Report the task path.
 
 ### OpenTask `[name-or-keyword]`
 
@@ -69,55 +82,101 @@ Use for `OpenTask`, `继续 task`, `打开任务`, `续接任务`, `接着上次
 
 Without an argument:
 
-1. Read config.
-2. Scan `task_root` for directories matching `YYYYMMDD-*`.
-3. Sort by the first eight date digits descending and list the latest five.
-4. Show each task's directory name, README goal first line, and status.
-5. Ask the user to choose; do not auto-open the newest task.
+1. Call `task_find` (no keyword) — the server returns the latest five tasks with goal and status.
+2. Ask the user to choose; do not auto-open the newest task.
 
 With an argument:
 
-1. Read config.
-2. Match a task directory by exact directory name first, then case-insensitive substring.
-3. If one match exists, open it. If multiple matches exist, list choices. If none exists, say so and suggest `CreateTask` or plain `OpenTask`.
-4. Set `_config.json.active_task` to the selected directory.
-5. Read, in order: `README.md`, `next.md`, the end of `progress.md`, recent rows of `changes.md`, and `decisions.md` only when needed.
-6. Summarize for the user: goal, status/current focus, recent progress, recent changes, next actions.
-7. Ask whether to continue with the recorded plan or adjust it.
+1. Call `task_open` with the directory name or keyword — the server sets the active task and returns the structured summary (README, memory, next, progress tail, recent changes, decisions).
+2. If the task has children, summarize each child's goal and status.
+3. Present: goal, status/current focus, key facts, recent progress, recent changes, next actions.
+4. Read more of `progress.md` / `changes.md` only when the tail is insufficient.
+5. Ask whether to continue with the recorded plan or adjust it.
 
 ### RecordTask
 
 Use for `RecordTask`, `记一下`, `记录一下`, `保存进度`, `更新进度`, `总结一下`, or similar.
 
-1. Read config and require a non-empty `active_task`. If none exists, ask the user to run `OpenTask` or `CreateTask`.
+1. If no task is active, ask the user to run `OpenTask` or `CreateTask` first.
 2. Review the current conversation since the last RecordTask, or since this conversation began.
 3. Append only real, observed work:
    - Progress goes to `progress.md` with a timestamp.
-   - File changes go to `changes.md`; aggregate repeated edits to the same file into one final-state row.
+   - File changes go to `changes.md` (row format below); aggregate repeated edits to the same file into one final-state row.
    - Decisions go to `decisions.md` only when an actual decision was made.
-4. Update `next.md` with unresolved or newly identified next steps. It may be rewritten, but do not drop unfinished work.
-5. Update `README.md` last-updated date and current focus when stale.
-6. Tell the user which files were updated and how many meaningful entries were added.
+4. Distill into `memory.md`: add key facts and learnings from this session, overwriting same-topic entries; keep the file bounded (~30 entries), merging or dropping the oldest low-value facts when over.
+5. Update `next.md` with unresolved or newly identified next steps. It may be rewritten, but do not drop unfinished work.
+6. Update `README.md` last-updated date and current focus when stale.
+7. Call `task_refresh` with the task and any changed goal.
+8. If a reusable pattern emerged (a tool installed/configured, a non-obvious setup, a hard-won solution), propose a knowledge-base entry to the user and call `knowledge_add` on confirmation — see Knowledge Base.
+9. Call `task_log_archive` so the server moves entries over `log_archive_threshold` (default 500) into `archive/` by month.
+10. Tell the user which files were updated and how many meaningful entries were added.
 
 ### ArchiveTask `[name-or-keyword]`
 
 Use for `ArchiveTask`, `完成 task`, `归档任务`, `结束这个任务`, or similar.
 
-1. Read config.
-2. Use the argument to find a task, or use `active_task` when no argument is supplied.
-3. Change the task README status from `🟡 进行中` to `✅ 已完成` and add a completion date.
-4. Add `# 已完成（YYYY-MM-DD）` at the top of `next.md`.
-5. Append an archive entry to `progress.md`.
-6. Move the task entry in `INDEX.md` from `🟡 进行中` to `✅ 已完成`.
-7. If the archived task is active, set `_config.json.active_task` to `""`.
-8. Do not move the task directory.
-9. Confirm completion to the user.
+1. Use the argument to find the task, or the active task when no argument is supplied.
+2. If the task has children in the index, tell the user the children remain open and confirm before archiving the parent.
+3. Call `task_archive` — the server marks the README `✅ 已完成` with a completion date, prepends `# 已完成（YYYY-MM-DD）` to `next.md`, appends an archive entry to `progress.md`, moves the index entry to `done`, and clears `active_task` if it was active.
+4. If reusable patterns emerged, propose knowledge-base entries — see Knowledge Base.
+5. Confirm completion to the user.
+
+### PauseTask `[name-or-keyword]`
+
+Use for `PauseTask`, `暂停 task`, `挂起任务`, `先放着`, or similar.
+
+1. Use the argument to find the task, or the active task when no argument is supplied.
+2. Call `task_status` with `status: "paused"` — the server updates the README (`⏸ 暂停` + pause date), moves the index entry, and clears `active_task` if it was active.
+3. Confirm to the user.
+
+### ResumeTask `[name-or-keyword]`
+
+Use for `ResumeTask`, `恢复 task`, `继续暂停的任务`, or similar.
+
+1. Use the argument to find the task. Without an argument, call `task_find` for paused tasks and ask the user to choose.
+2. Call `task_status` with `status: "active"` — the server restores the README (`🟡 进行中`, refreshed date), moves the index entry back, and sets `active_task`.
+3. Read `next.md` and `memory.md`, then confirm to the user with a summary.
+
+### SearchTask `<keyword> [more keywords...]`
+
+Use for `SearchTask`, `搜索任务`, `查一下任务`, `找找之前那个`, or similar.
+
+1. Require at least one keyword; call `task_find` — the server matches against task `name`, `goal`, and `tags` in the index (exact directory name wins). No directory scanning.
+2. Report matches grouped by status, showing directory name, goal, tags, and children count.
+3. If nothing matches, say so and suggest `OpenTask` with a directory-name keyword instead.
+4. If the user asks to search inside task memory files (README/progress/changes/decisions/next/memory), read the matching tasks' files directly — tell the user this is a slower full-content scan.
+5. Read-only: never modify task files during a search.
+
+### LinkTask `<parent-name> <child-name>`
+
+Use for `LinkTask`, `建立父子任务`, `把 task 挂到`, or similar.
+
+1. Resolve both names (exact directory name first, then substring). If either is ambiguous or missing, list choices.
+2. Call `task_link` — the server writes `parent`/`children` in the index and the `**父任务**` line in the child README.
+3. Confirm. Hierarchy is display-only: tasks stay flat on disk and keep their own status/lifecycle. Opening a parent shows its children; archiving a parent asks about open children first.
+
+### KnowledgeAdd `<title> [tags...]`
+
+Use for `KnowledgeAdd`, `存入知识库`, `记一条知识`, `沉淀经验`, or similar.
+
+1. Require a title; if missing, ask for it.
+2. Draft the body from the current conversation with sections `## 场景`, `## 步骤`, `## 命令`, `## 注意事项`.
+3. Call `knowledge_add` with `title`, `tags`, `body`. The server writes `_knowledge\KB-YYYYMMDD-<slug>.md` (dedupe by title: updates the existing entry) and records `source_task` from the active task.
+4. Confirm and give the entry path.
+
+### KnowledgeSearch `<keyword> [more keywords...]`
+
+Use for `KnowledgeSearch`, `查知识库`, or similar.
+
+1. Require at least one keyword; call `knowledge_search`.
+2. Report matching entries: title, tags, source_task, and the matching line (trimmed).
+3. If no matches, say so. Read-only.
 
 ### Tracking Settings
 
 Use for `设置记录密度`, `记详细点`, `只记阶段进度`, `别每步都记`, `打开自动追踪`, `关闭自动追踪`, or similar.
 
-After reading config, update fields by intent:
+Call `config_set` with fields by intent:
 
 ```text
 记详细点 / 每步都记        -> auto_track_changes=true,  change_log_level=step
@@ -126,7 +185,7 @@ After reading config, update fields by intent:
 打开自动追踪              -> auto_track_changes=true; if manual, promote to feature
 ```
 
-Write the config and confirm the new behavior in one sentence.
+Confirm the new behavior in one sentence.
 
 ## Change Tracking
 
@@ -136,7 +195,7 @@ Always use this row format in `changes.md`:
 | YYYY-MM-DD HH:MM | <absolute path> | <新增|修改|删除> | <brief reason> |
 ```
 
-Apply tracking only to user/project work. Do not recursively log OpenTask bookkeeping edits to `_config.json`, `INDEX.md`, or task memory files unless the user explicitly asks to track those files as project changes.
+Apply tracking only to user/project work. Do not recursively log OpenTask bookkeeping edits to `_config.json`, `tasks.json`, `INDEX.md`, or task memory files unless the user explicitly asks to track those files as project changes.
 
 Respect `change_log_level`:
 
@@ -159,33 +218,62 @@ Do not record routine questions, pure discussion, or every small edit as progres
 
 ## Session Start
 
-If the first user message in a conversation asks about previous work, last time, yesterday, continuing a task, or names `E:\Task`, perform OpenTask self-check:
+If the first user message in a conversation asks about previous work, last time, yesterday, continuing a task, or names the task root (`E:\Task` on Windows, `~/Documents/Task` on macOS/Linux), perform OpenTask self-check:
 
-1. Read config.
-2. If `active_task` exists, read its README and `next.md`, then summarize current state.
-3. If no task is active, list the latest five tasks for selection.
+1. Call `init` (or `config_get`).
+2. If `active_task` exists, read its README, `memory.md`, and `next.md`, then summarize current state.
+3. If no task is active, call `task_find` (latest five) for selection.
 
 Do not start this flow when the user is not talking about tasks.
 
+## Knowledge Base
+
+`_knowledge\` at the task root accumulates reusable experience across tasks. Entries are plain markdown, hand-editable:
+
+```markdown
+---
+title: GitHub MCP 安装配置
+tags: [github, mcp, setup]
+source_task: 20260824-xxx
+created: 2026-08-24
+---
+
+## 场景
+## 步骤
+## 命令
+## 注意事项
+```
+
+Entry lifecycle:
+
+- Suggested during `RecordTask` / `ArchiveTask` when a reusable pattern appears (a tool installed and configured, a non-obvious setup, a hard-won solution). Write only on user confirmation — never silently.
+- Added directly via `KnowledgeAdd` (`knowledge_add`).
+- Searched via `KnowledgeSearch` (`knowledge_search`).
+- Keep entries actionable and specific; skip one-off trivia. Entries may be edited or deleted by the user at any time.
+
 ## Templates
 
-Use `templates/` as bundled resources:
+`templates/` are bundled resources copied by the server — the model never edits them:
 
 | Template | Destination | Notes |
 |---|---|---|
-| `README.md` | task directory | Replace `{{TASK_ID}}`, `{{TASK_NAME}}`, `{{CREATED_DATE}}`, `{{GOAL}}` |
-| `progress.md` | task directory | Replace `{{CREATED_DATE}}` |
+| `README.md` | task directory | `{{TASK_ID}}`, `{{TASK_NAME}}`, `{{CREATED_DATE}}`, `{{GOAL}}`; maintain `**父任务**` / `**标签**` |
+| `progress.md` | task directory | `{{CREATED_DATE}}` |
 | `changes.md` | task directory | Table header only |
 | `decisions.md` | task directory | Decision format guide |
 | `next.md` | task directory | Starting plan structure |
+| `memory.md` | task directory | Key-facts template |
 | `_config.json` | task root | Copy only when missing |
+| `tasks.json` | task root | Copy only when missing |
 | `INDEX.md` | task root | Copy only when missing |
 
 ## Guardrails
 
+- Index and config mutations go through MCP tools only — never hand-edit `tasks.json`, `INDEX.md`, or `_config.json`.
 - Use absolute paths for task-file operations.
 - Preserve history: append to `progress.md`, `changes.md`, and `decisions.md`; never rewrite old entries except to fix formatting when explicitly requested.
 - Do not invent progress, changes, or decisions.
 - Do not auto-open a task when plain `OpenTask` has multiple possible tasks; ask the user to choose.
-- Do not create task directories outside configured `task_root`.
+- Do not create task directories outside the configured `task_root`.
 - Keep task records concise; record facts and next actions, not full chat transcripts.
+- If the opentask MCP tools are unavailable, do not improvise file operations: tell the user to restart opencode and verify `mcp.opentask` in the global config.

@@ -1,6 +1,6 @@
 # Task 索引
 
-> 由 opentask skill 自动维护。每次 CreateTask / ArchiveTask 时更新。
+> 由 opentask skill 自动维护。每次 CreateTask / LinkTask / PauseTask / ResumeTask / ArchiveTask 时更新。
 
 **最后更新**: -
 

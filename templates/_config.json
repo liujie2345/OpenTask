@@ -1,7 +1,10 @@
 {
-  "task_root": "E:\\Task",
+  "version": 2,
+  "task_root": "",
   "active_task": "",
   "auto_track_changes": true,
   "change_log_level": "feature",
-  "auto_update_progress": true
+  "auto_update_progress": true,
+  "log_archive_threshold": 500,
+  "knowledge_enabled": true
 }
