@@ -12,6 +12,7 @@ export const TEMPLATES_DIR = path.resolve(__dirname, "..", "..", "templates");
 
 export type TaskStatus = "active" | "paused" | "done";
 export type LogLevel = "step" | "feature" | "manual";
+export type TaskKind = "task" | "project";
 
 export interface Config {
   version: number;
@@ -34,6 +35,11 @@ export interface TaskEntry {
   updated: string; // YYYY-MM-DD
   goal: string;
   tags: string[];
+  kind?: TaskKind; // 项目标记；缺省视为 "task"
+}
+
+export function entryKind(t: TaskEntry): TaskKind {
+  return t.kind ?? "task";
 }
 
 export interface TaskIndex {
@@ -195,6 +201,16 @@ export function renderIndex(index: TaskIndex): string {
     `**最后更新**: ${nowStamp()}`,
     "",
   ];
+  const projects = Object.values(index.tasks)
+    .filter((t) => entryKind(t) === "project")
+    .sort((a, b) => b.created.localeCompare(a.created));
+  if (projects.length) {
+    lines.push("## 📁 项目", "");
+    for (const p of projects) {
+      lines.push(`- \`${p.path}\` — ${p.goal || p.name}（${p.children.length} 个任务）`);
+    }
+    lines.push("");
+  }
   const sections: Array<[TaskStatus, string]> = [
     ["active", "🟡 进行中"],
     ["paused", "⏸ 暂停"],
@@ -203,7 +219,7 @@ export function renderIndex(index: TaskIndex): string {
   for (const [status, title] of sections) {
     lines.push(`## ${title}`, "");
     const list = Object.values(index.tasks)
-      .filter((t) => t.status === status)
+      .filter((t) => t.status === status && entryKind(t) === "task")
       .sort((a, b) => b.created.localeCompare(a.created));
     if (list.length === 0) {
       lines.push("（无）", "");
@@ -229,6 +245,7 @@ export function rebuildIndex(root: string): TaskIndex {
     let goal = "";
     let parent: string | null = null;
     let tags: string[] = [];
+    let kind: TaskKind = "task";
     if (fs.existsSync(readmePath)) {
       const text = readText(readmePath);
       status = text.includes("✅ 已完成")
@@ -239,11 +256,12 @@ export function rebuildIndex(root: string): TaskIndex {
       goal = firstLineAfter(text, "## 目标") ?? "";
       parent = fieldValue(text, "**父任务**") || null;
       tags = (fieldValue(text, "**标签**") ?? "")
-        .split(/[\s,，]+/)
+        .split(/[\\s,，]+/)
         .filter(Boolean);
+      if (fieldValue(text, "**类型**") === "项目") kind = "project";
     }
     const created = fmtDateFromKey(d.name.slice(0, 8));
-    index.tasks[d.name] = {
+    const entry: TaskEntry = {
       name: d.name.slice(9),
       path: d.name,
       parent,
@@ -254,6 +272,8 @@ export function rebuildIndex(root: string): TaskIndex {
       goal,
       tags,
     };
+    if (kind === "project") entry.kind = "project";
+    index.tasks[d.name] = entry;
   }
   // Preserve hierarchy/tags the previous index knew (README may not carry all).
   const oldPath = path.join(root, "tasks.json");
@@ -268,6 +288,7 @@ export function rebuildIndex(root: string): TaskIndex {
           if (Array.isArray(e.children)) {
             cur.children = e.children.filter((c) => index.tasks[c]);
           }
+          if (e.kind && !cur.kind) cur.kind = e.kind;
         }
       }
     } catch {
@@ -304,10 +325,17 @@ function escapeRegExp(s: string): string {
 
 // ---------- task lookup ----------
 
-export function listRecent(index: TaskIndex, n = 5): TaskEntry[] {
+export function listRecent(index: TaskIndex, n = 5, kind?: TaskKind): TaskEntry[] {
   return Object.values(index.tasks)
+    .filter((t) => !kind || entryKind(t) === kind)
     .sort((a, b) => b.created.localeCompare(a.created))
     .slice(0, n);
+}
+
+export function listAll(index: TaskIndex, kind?: TaskKind): TaskEntry[] {
+  return Object.values(index.tasks)
+    .filter((t) => !kind || entryKind(t) === kind)
+    .sort((a, b) => b.created.localeCompare(a.created));
 }
 
 export function searchIndex(index: TaskIndex, keyword: string): TaskEntry[] {
@@ -350,6 +378,7 @@ export function createTask(
   name: string,
   tags: string[],
   goal?: string,
+  project?: TaskEntry,
 ): { dir: string; path: string; config: Config; index: TaskIndex } {
   const index = loadIndex(root);
   const ymd = ymdKey();
@@ -391,9 +420,110 @@ export function createTask(
     goal: goal?.trim() || "",
     tags: tags ?? [],
   };
+  if (project) {
+    if (entryKind(project) !== "project") {
+      throw new Error(`"${project.path}" 不是项目，不能作为容器`);
+    }
+    index.tasks[dir]!.parent = project.path;
+    const projEntry = index.tasks[project.path]!;
+    if (!projEntry.children.includes(dir)) projEntry.children.push(dir);
+  }
   saveConfig(root, config);
+  if (project) syncProjectReadme(root, index, project.path);
   saveIndex(root, index);
   return { dir, path: taskDir, config, index };
+}
+
+// ---------- projects ----------
+
+const CHILDREN_BEGIN = "<!-- opentask:children:auto -->";
+const CHILDREN_END = "<!-- /opentask:children:auto -->";
+
+function renderChildrenTable(index: TaskIndex, project: TaskEntry): string {
+  const rows = project.children
+    .map((c) => index.tasks[c])
+    .filter((t): t is TaskEntry => Boolean(t))
+    .map(
+      (t) =>
+        `- ${{ active: "🟡", paused: "⏸", done: "✅" }[t.status]} \`${t.path}\` — ${t.goal || t.name}`,
+    );
+  return [
+    CHILDREN_BEGIN,
+    ...(rows.length ? rows : ["<暂无任务，用 CreateTask 创建并加入此项目>"]),
+    CHILDREN_END,
+  ].join("\n");
+}
+
+/** Regenerate the auto-maintained task table in a project README. */
+export function syncProjectReadme(
+  root: string,
+  index: TaskIndex,
+  projectPath: string,
+): void {
+  const project = index.tasks[projectPath];
+  if (!project || entryKind(project) !== "project") return;
+  const readmePath = path.join(root, projectPath, "README.md");
+  if (!fs.existsSync(readmePath)) return;
+  const text = readText(readmePath);
+  const table = renderChildrenTable(index, project);
+  const begin = text.indexOf(CHILDREN_BEGIN);
+  const end = text.indexOf(CHILDREN_END);
+  const next =
+    begin !== -1 && end !== -1 && end > begin
+      ? text.slice(0, begin) + table + text.slice(end + CHILDREN_END.length)
+      : text.trimEnd() + "\n\n## 任务列表\n\n" + table + "\n";
+  writeText(readmePath, next);
+}
+
+export function createProject(
+  root: string,
+  config: Config,
+  name: string,
+  goal: string,
+  tags: string[],
+): { dir: string; path: string; config: Config; index: TaskIndex } {
+  const index = loadIndex(root);
+  const ymd = ymdKey();
+  let dir = `${ymd}-${name}`;
+  let n = 2;
+  while (fs.existsSync(path.join(root, dir))) {
+    dir = `${ymd}-${name}-${n++}`;
+  }
+  const projDir = path.join(root, dir);
+  fs.mkdirSync(projDir, { recursive: true });
+
+  const created = today();
+  const goalText = goal.trim() || "<待补充>";
+  const replacements: Record<string, string> = {
+    "{{TASK_ID}}": dir,
+    "{{TASK_NAME}}": name,
+    "{{CREATED_DATE}}": created,
+    "{{GOAL}}": goalText,
+  };
+  for (const tpl of ["PROJECT_README.md", "PROJECT_PROGRESS.md", "PROJECT_DECISIONS.md"]) {
+    const src = path.join(TEMPLATES_DIR, tpl);
+    if (!fs.existsSync(src)) continue;
+    let content = readText(src);
+    for (const [k, v] of Object.entries(replacements)) {
+      content = content.split(k).join(v);
+    }
+    writeText(path.join(projDir, tpl.replace(/^PROJECT_/, "").toLowerCase()), content);
+  }
+
+  index.tasks[dir] = {
+    name,
+    path: dir,
+    parent: null,
+    children: [],
+    status: "active",
+    created,
+    updated: created,
+    goal: goal.trim(),
+    tags: tags ?? [],
+    kind: "project",
+  };
+  saveIndex(root, index);
+  return { dir, path: projDir, config, index };
 }
 
 /** Transition active/paused/done, keeping README + index + INDEX.md consistent. */
@@ -436,6 +566,10 @@ export function setTaskStatus(
     entry.status = status;
     entry.updated = today();
   }
+  const parentEntry = task.parent ? index.tasks[task.parent] : undefined;
+  if (parentEntry && entryKind(parentEntry) === "project") {
+    syncProjectReadme(root, index, parentEntry.path);
+  }
   if (status === "paused" || status === "done") {
     if (config.active_task === task.path) config.active_task = "";
   } else {
@@ -471,10 +605,14 @@ export function linkTask(
   parent: TaskEntry,
   child: TaskEntry,
 ): void {
+  if (entryKind(child) === "project") {
+    throw new Error("项目不能挂到其他任务或项目下面");
+  }
   index.tasks[child.path]!.parent = parent.path;
   const siblings = index.tasks[parent.path]!.children;
   if (!siblings.includes(child.path)) siblings.push(child.path);
   saveIndex(root, index);
+  if (entryKind(parent) === "project") syncProjectReadme(root, index, parent.path);
 
   const readmePath = path.join(root, child.path, "README.md");
   if (fs.existsSync(readmePath)) {

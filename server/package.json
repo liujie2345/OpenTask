@@ -1,6 +1,6 @@
 {
   "name": "opentask-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "MCP server backing the OpenTask skill: deterministic task index, lifecycle transitions, log archival, and knowledge base operations.",

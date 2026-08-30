@@ -1,6 +1,6 @@
 ﻿---
 name: opentask
-description: Task persistence workflow for OpenCode, backed by the opentask MCP server. Use when the user says CreateTask, OpenTask, ArchiveTask, RecordTask, SearchTask, PauseTask, ResumeTask, LinkTask, KnowledgeAdd, KnowledgeSearch, 新建/继续/打开/完成/归档/暂停/恢复/搜索/关联 task, 父子任务, 挂起任务, 查一下任务, 存入知识库, 查知识库, 记一条知识, 记一下, 保存当前进度, 更新进度, 设置记录密度, 打开或关闭自动追踪, asks what they were doing last time, mentions historical work under E:\Task\ or ~/Documents/Task, or wants a development task remembered across OpenCode conversations.
+description: Task persistence workflow for OpenCode, backed by the opentask MCP server. Use when the user says CreateTask, OpenTask, ArchiveTask, RecordTask, SearchTask, TaskList, TaskAll, CreateProject, OpenProject, ProjectList, PauseTask, ResumeTask, LinkTask, KnowledgeAdd, KnowledgeSearch, 新建/继续/打开/完成/归档/暂停/恢复/搜索/关联/列出 task, 最近任务, 任务列表, 所有任务, 创建项目, 打开项目, 项目列表, 父子任务, 挂起任务, 查一下任务, 存入知识库, 查知识库, 记一条知识, 记一下, 保存当前进度, 更新进度, 设置记录密度, 打开或关闭自动追踪, asks what they were doing last time, mentions historical work under E:\Task\ or ~/Documents/Task, or wants a development task remembered across OpenCode conversations.
 ---
 
 # OpenTask
@@ -20,6 +20,8 @@ next.md       next actions; rewrite as needed, preserving unresolved work
 memory.md     key facts and learnings, deduplicated, bounded
 archive       drafts, references, temporary material, archived log segments
 ```
+
+A project is the same kind of directory but holds only `README.md`, `progress.md`, and `decisions.md` — project-level coordination files, no task working files. Its README carries `**类型**: 项目` and an auto-maintained task table between `<!-- opentask:children:auto -->` markers, listing member tasks and their statuses.
 
 Global files at the task root:
 
@@ -48,7 +50,7 @@ Config normalization is handled entirely by the server (v2 shape, `change_log_le
 
 - `tasks.json` is the single query source for tasks. It is maintained **exclusively by server tools** (`task_create`, `task_open`, `task_status`, `task_archive`, `task_link`, `task_refresh`) — never hand-edit it.
 - `INDEX.md` is re-rendered by the server on every index write; never hand-edit it either.
-- `status` is one of `active` (`🟡 进行中`), `paused` (`⏸ 暂停`), `done` (`✅ 已完成`). Hierarchy (`parent` / `children`) lives only in the index: the filesystem layout stays flat (`YYYYMMDD-*` directly under `task_root`).
+- `status` is one of `active` (`🟡 进行中`), `paused` (`⏸ 暂停`), `done` (`✅ 已完成`). Hierarchy (`parent` / `children`) lives only in the index: the filesystem layout stays flat (`YYYYMMDD-*` directly under `task_root`). Index entries carry an optional `kind` (`task` default, `project`) — projects render in the `📁 项目` section of `INDEX.md` and are excluded from `tasklist` / `taskall` / `task_find` listings (use `projectlist` instead).
 - Call `index_rebuild` when the index is missing or visibly stale (the server also auto-rebuilds on a stale version). It scans the task root, reads README fields (`**状态**`, `## 目标` first line, `**父任务**`, `**标签**`), and preserves known hierarchy where possible.
 
 ## Commands
@@ -63,6 +65,11 @@ Command-to-tool map:
 | ArchiveTask | `task_archive`, `knowledge_add` |
 | PauseTask / ResumeTask | `task_status` |
 | SearchTask | `task_find` |
+| TaskList | `tasklist` |
+| TaskAll | `taskall` |
+| ProjectCreate | `project_create` |
+| OpenProject | `project_open` |
+| ProjectList | `projectlist` |
 | LinkTask | `task_link` |
 | KnowledgeAdd / KnowledgeSearch | `knowledge_add`, `knowledge_search` |
 | Tracking Settings | `config_set` |
@@ -72,9 +79,10 @@ Command-to-tool map:
 Use for `CreateTask`, `新建 task`, `创建任务`, `开个任务`, or similar.
 
 1. Require a user-provided name. If missing, ask for it. Optional space-separated tags (e.g. `CreateTask 部署脚本 infra deploy`) are passed through.
-2. Call `task_create` with `name`, `tags`, and `goal` if the user supplied one.
-3. If the goal is still unknown, ask for a concise goal, then call `task_refresh` with the goal so README and index stay in sync.
-4. Report the task path.
+2. If projects exist, ask whether the task belongs to one; when the user names one, pass it as `project` (directory name or keyword). If the user wants a new project instead, create it first with ProjectCreate (asking what the project is mainly about).
+3. Call `task_create` with `name`, `tags`, and `goal` if the user supplied one.
+4. If the goal is still unknown, ask for a concise goal, then call `task_refresh` with the goal so README and index stay in sync.
+5. Report the task path.
 
 ### OpenTask `[name-or-keyword]`
 
@@ -89,9 +97,10 @@ With an argument:
 
 1. Call `task_open` with the directory name or keyword — the server sets the active task and returns the structured summary (README, memory, next, progress tail, recent changes, decisions).
 2. If the task has children, summarize each child's goal and status.
-3. Present: goal, status/current focus, key facts, recent progress, recent changes, next actions.
-4. Read more of `progress.md` / `changes.md` only when the tail is insufficient.
-5. Ask whether to continue with the recorded plan or adjust it.
+3. If the task has a parent project, read the project README (goal, member tasks, coupling notes) and the project decisions for cross-task context before summarizing.
+4. Present: goal, status/current focus, key facts, recent progress, recent changes, next actions.
+5. Read more of `progress.md` / `changes.md` only when the tail is insufficient.
+6. Ask whether to continue with the recorded plan or adjust it.
 
 ### RecordTask
 
@@ -105,11 +114,12 @@ Use for `RecordTask`, `记一下`, `记录一下`, `保存进度`, `更新进度
    - Decisions go to `decisions.md` only when an actual decision was made.
 4. Distill into `memory.md`: add key facts and learnings from this session, overwriting same-topic entries; keep the file bounded (~30 entries), merging or dropping the oldest low-value facts when over.
 5. Update `next.md` with unresolved or newly identified next steps. It may be rewritten, but do not drop unfinished work.
-6. Update `README.md` last-updated date and current focus when stale.
-7. Call `task_refresh` with the task and any changed goal.
-8. If a reusable pattern emerged (a tool installed/configured, a non-obvious setup, a hard-won solution), propose a knowledge-base entry to the user and call `knowledge_add` on confirmation — see Knowledge Base.
-9. Call `task_log_archive` so the server moves entries over `log_archive_threshold` (default 500) into `archive/` by month.
-10. Tell the user which files were updated and how many meaningful entries were added.
+6. If the task belongs to a project, also append project-level progress (milestones, cross-task impacts) to the project's `progress.md`, and record cross-task decisions with an `**影响**` field in the project's `decisions.md`.
+7. Update `README.md` last-updated date and current focus when stale.
+8. Call `task_refresh` with the task and any changed goal.
+9. If a reusable pattern emerged (a tool installed/configured, a non-obvious setup, a hard-won solution), propose a knowledge-base entry to the user and call `knowledge_add` on confirmation — see Knowledge Base.
+10. Call `task_log_archive` so the server moves entries over `log_archive_threshold` (default 500) into `archive/` by month.
+11. Tell the user which files were updated and how many meaningful entries were added.
 
 ### ArchiveTask `[name-or-keyword]`
 
@@ -146,6 +156,49 @@ Use for `SearchTask`, `搜索任务`, `查一下任务`, `找找之前那个`, o
 3. If nothing matches, say so and suggest `OpenTask` with a directory-name keyword instead.
 4. If the user asks to search inside task memory files (README/progress/changes/decisions/next/memory), read the matching tasks' files directly — tell the user this is a slower full-content scan.
 5. Read-only: never modify task files during a search.
+
+### TaskList
+
+Use for `TaskList`, `最近任务`, `任务列表`, `列出任务`, or similar — the user wants a quick pick list.
+
+1. Call `tasklist` — the server returns the five most recent tasks (newest first) as `seq` / `title` / `path` / `created` / `status` / `is_active`.
+2. Present the list as `seq. 标题（创建日期，状态）`, marking the active task. Keep it to one line per task.
+3. Ask the user to pick one by number or name. When they choose, call `task_open` with the listed `path` and follow the OpenTask flow.
+4. Read-only: do not open or modify anything until the user picks.
+
+### TaskAll
+
+Use for `TaskAll`, `所有任务`, `任务全列表`, `全部任务`, or similar — same presentation as TaskList but across the whole task root.
+
+1. Call `taskall` — the server returns every task, newest first, in the same shape.
+2. Present the list the same way; if it is long, group by status (进行中 / 暂停 / 已完成) instead of one flat list.
+3. When the user picks one, call `task_open` with the listed `path` and follow the OpenTask flow.
+4. Read-only: do not open or modify anything until the user picks.
+
+### ProjectCreate `<name> [tags...]`
+
+Use for `CreateProject`, `创建项目`, `新建项目`, `开个项目`, or similar — a long-lived container grouping related tasks (e.g. a game project with UI/gameplay tasks).
+
+1. Require a name. Always ask what the project is mainly about — `project_create` requires a `goal`.
+2. Call `project_create` with `name`, `goal`, and optional `tags`. The server creates a `YYYYMMDD-<name>` directory with README/progress/decisions templates and a `kind: project` index entry; `active_task` is not changed.
+3. Report the project path and suggest adding tasks via `CreateTask` (with the project) or `LinkTask`.
+
+### OpenProject `<name-or-keyword>`
+
+Use for `OpenProject`, `打开项目`, `看下项目`, or similar.
+
+1. Without an argument, call `projectlist` and ask the user to choose. With an argument, call `project_open` with the directory name or keyword.
+2. Present: project goal, each member task's status (the README task table), and the summary (README, progress tail, decisions). Read-only — `active_task` is unchanged.
+3. When working on one of its tasks afterwards, treat the project README/decisions as cross-task context: check interface agreements and coupling notes before changing shared behavior.
+
+### ProjectList
+
+Use for `ProjectList`, `项目列表`, `最近项目`, or similar — quick pick list of projects, same style as TaskList.
+
+1. Call `projectlist` — the server returns the five most recent projects (newest first) with `seq` / `title` / `path` / `created` / `status` / `tasks` count.
+2. Present one per line as `seq. 标题（创建日期，状态，N 个任务）`.
+3. When the user picks one, call `project_open` with the listed `path`.
+4. Read-only: do not open or modify anything until the user picks.
 
 ### LinkTask `<parent-name> <child-name>`
 
@@ -263,6 +316,9 @@ Entry lifecycle:
 | `decisions.md` | task directory | Decision format guide |
 | `next.md` | task directory | Starting plan structure |
 | `memory.md` | task directory | Key-facts template |
+| `PROJECT_README.md` | project directory | Same placeholders plus `**类型**: 项目` and the auto task-table markers |
+| `PROJECT_PROGRESS.md` | project directory | Project-level milestone log |
+| `PROJECT_DECISIONS.md` | project directory | Decision format with `**影响**` field |
 | `_config.json` | task root | Copy only when missing |
 | `tasks.json` | task root | Copy only when missing |
 | `INDEX.md` | task root | Copy only when missing |

@@ -21427,6 +21427,9 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 var __dirname = path.dirname(fileURLToPath(import.meta.url));
 var TEMPLATES_DIR = path.resolve(__dirname, "..", "..", "templates");
+function entryKind(t) {
+  return t.kind ?? "task";
+}
 function pad(n) {
   return String(n).padStart(2, "0");
 }
@@ -21545,6 +21548,14 @@ function renderIndex(index) {
     `**\u6700\u540E\u66F4\u65B0**: ${nowStamp()}`,
     ""
   ];
+  const projects = Object.values(index.tasks).filter((t) => entryKind(t) === "project").sort((a, b) => b.created.localeCompare(a.created));
+  if (projects.length) {
+    lines.push("## \u{1F4C1} \u9879\u76EE", "");
+    for (const p of projects) {
+      lines.push(`- \`${p.path}\` \u2014 ${p.goal || p.name}\uFF08${p.children.length} \u4E2A\u4EFB\u52A1\uFF09`);
+    }
+    lines.push("");
+  }
   const sections = [
     ["active", "\u{1F7E1} \u8FDB\u884C\u4E2D"],
     ["paused", "\u23F8 \u6682\u505C"],
@@ -21552,7 +21563,7 @@ function renderIndex(index) {
   ];
   for (const [status, title] of sections) {
     lines.push(`## ${title}`, "");
-    const list = Object.values(index.tasks).filter((t) => t.status === status).sort((a, b) => b.created.localeCompare(a.created));
+    const list = Object.values(index.tasks).filter((t) => t.status === status && entryKind(t) === "task").sort((a, b) => b.created.localeCompare(a.created));
     if (list.length === 0) {
       lines.push("\uFF08\u65E0\uFF09", "");
       continue;
@@ -21574,15 +21585,17 @@ function rebuildIndex(root) {
     let goal = "";
     let parent = null;
     let tags = [];
+    let kind = "task";
     if (fs.existsSync(readmePath)) {
       const text = readText(readmePath);
       status = text.includes("\u2705 \u5DF2\u5B8C\u6210") ? "done" : text.includes("\u23F8 \u6682\u505C") ? "paused" : "active";
       goal = firstLineAfter(text, "## \u76EE\u6807") ?? "";
       parent = fieldValue(text, "**\u7236\u4EFB\u52A1**") || null;
-      tags = (fieldValue(text, "**\u6807\u7B7E**") ?? "").split(/[\s,，]+/).filter(Boolean);
+      tags = (fieldValue(text, "**\u6807\u7B7E**") ?? "").split(/[\\s,，]+/).filter(Boolean);
+      if (fieldValue(text, "**\u7C7B\u578B**") === "\u9879\u76EE") kind = "project";
     }
     const created = fmtDateFromKey(d.name.slice(0, 8));
-    index.tasks[d.name] = {
+    const entry = {
       name: d.name.slice(9),
       path: d.name,
       parent,
@@ -21593,6 +21606,8 @@ function rebuildIndex(root) {
       goal,
       tags
     };
+    if (kind === "project") entry.kind = "project";
+    index.tasks[d.name] = entry;
   }
   const oldPath = path.join(root, "tasks.json");
   if (fs.existsSync(oldPath)) {
@@ -21606,6 +21621,7 @@ function rebuildIndex(root) {
           if (Array.isArray(e.children)) {
             cur.children = e.children.filter((c) => index.tasks[c]);
           }
+          if (e.kind && !cur.kind) cur.kind = e.kind;
         }
       }
     } catch {
@@ -21635,8 +21651,11 @@ function fieldValue(text, field) {
 function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
-function listRecent(index, n = 5) {
-  return Object.values(index.tasks).sort((a, b) => b.created.localeCompare(a.created)).slice(0, n);
+function listRecent(index, n = 5, kind) {
+  return Object.values(index.tasks).filter((t) => !kind || entryKind(t) === kind).sort((a, b) => b.created.localeCompare(a.created)).slice(0, n);
+}
+function listAll(index, kind) {
+  return Object.values(index.tasks).filter((t) => !kind || entryKind(t) === kind).sort((a, b) => b.created.localeCompare(a.created));
 }
 function searchIndex(index, keyword) {
   const kw = keyword.toLowerCase();
@@ -21661,7 +21680,7 @@ function resolveTask(index, keyword) {
   }
   return subs.length > 1 ? subs : null;
 }
-function createTask(root, config2, name, tags, goal) {
+function createTask(root, config2, name, tags, goal, project) {
   const index = loadIndex(root);
   const ymd = ymdKey();
   let dir = `${ymd}-${name}`;
@@ -21700,9 +21719,84 @@ function createTask(root, config2, name, tags, goal) {
     goal: goal?.trim() || "",
     tags: tags ?? []
   };
+  if (project) {
+    if (entryKind(project) !== "project") {
+      throw new Error(`"${project.path}" \u4E0D\u662F\u9879\u76EE\uFF0C\u4E0D\u80FD\u4F5C\u4E3A\u5BB9\u5668`);
+    }
+    index.tasks[dir].parent = project.path;
+    const projEntry = index.tasks[project.path];
+    if (!projEntry.children.includes(dir)) projEntry.children.push(dir);
+  }
   saveConfig(root, config2);
+  if (project) syncProjectReadme(root, index, project.path);
   saveIndex(root, index);
   return { dir, path: taskDir, config: config2, index };
+}
+var CHILDREN_BEGIN = "<!-- opentask:children:auto -->";
+var CHILDREN_END = "<!-- /opentask:children:auto -->";
+function renderChildrenTable(index, project) {
+  const rows = project.children.map((c) => index.tasks[c]).filter((t) => Boolean(t)).map(
+    (t) => `- ${{ active: "\u{1F7E1}", paused: "\u23F8", done: "\u2705" }[t.status]} \`${t.path}\` \u2014 ${t.goal || t.name}`
+  );
+  return [
+    CHILDREN_BEGIN,
+    ...rows.length ? rows : ["<\u6682\u65E0\u4EFB\u52A1\uFF0C\u7528 CreateTask \u521B\u5EFA\u5E76\u52A0\u5165\u6B64\u9879\u76EE>"],
+    CHILDREN_END
+  ].join("\n");
+}
+function syncProjectReadme(root, index, projectPath) {
+  const project = index.tasks[projectPath];
+  if (!project || entryKind(project) !== "project") return;
+  const readmePath = path.join(root, projectPath, "README.md");
+  if (!fs.existsSync(readmePath)) return;
+  const text = readText(readmePath);
+  const table = renderChildrenTable(index, project);
+  const begin = text.indexOf(CHILDREN_BEGIN);
+  const end = text.indexOf(CHILDREN_END);
+  const next = begin !== -1 && end !== -1 && end > begin ? text.slice(0, begin) + table + text.slice(end + CHILDREN_END.length) : text.trimEnd() + "\n\n## \u4EFB\u52A1\u5217\u8868\n\n" + table + "\n";
+  writeText(readmePath, next);
+}
+function createProject(root, config2, name, goal, tags) {
+  const index = loadIndex(root);
+  const ymd = ymdKey();
+  let dir = `${ymd}-${name}`;
+  let n = 2;
+  while (fs.existsSync(path.join(root, dir))) {
+    dir = `${ymd}-${name}-${n++}`;
+  }
+  const projDir = path.join(root, dir);
+  fs.mkdirSync(projDir, { recursive: true });
+  const created = today();
+  const goalText = goal.trim() || "<\u5F85\u8865\u5145>";
+  const replacements = {
+    "{{TASK_ID}}": dir,
+    "{{TASK_NAME}}": name,
+    "{{CREATED_DATE}}": created,
+    "{{GOAL}}": goalText
+  };
+  for (const tpl of ["PROJECT_README.md", "PROJECT_PROGRESS.md", "PROJECT_DECISIONS.md"]) {
+    const src = path.join(TEMPLATES_DIR, tpl);
+    if (!fs.existsSync(src)) continue;
+    let content = readText(src);
+    for (const [k, v] of Object.entries(replacements)) {
+      content = content.split(k).join(v);
+    }
+    writeText(path.join(projDir, tpl.replace(/^PROJECT_/, "").toLowerCase()), content);
+  }
+  index.tasks[dir] = {
+    name,
+    path: dir,
+    parent: null,
+    children: [],
+    status: "active",
+    created,
+    updated: created,
+    goal: goal.trim(),
+    tags: tags ?? [],
+    kind: "project"
+  };
+  saveIndex(root, index);
+  return { dir, path: projDir, config: config2, index };
 }
 function setTaskStatus(root, config2, index, task, status) {
   const readmePath = path.join(root, task.path, "README.md");
@@ -21738,6 +21832,10 @@ function setTaskStatus(root, config2, index, task, status) {
     entry.status = status;
     entry.updated = today();
   }
+  const parentEntry = task.parent ? index.tasks[task.parent] : void 0;
+  if (parentEntry && entryKind(parentEntry) === "project") {
+    syncProjectReadme(root, index, parentEntry.path);
+  }
   if (status === "paused" || status === "done") {
     if (config2.active_task === task.path) config2.active_task = "";
   } else {
@@ -21766,10 +21864,14 @@ ${text}`);
   }
 }
 function linkTask(root, index, parent, child) {
+  if (entryKind(child) === "project") {
+    throw new Error("\u9879\u76EE\u4E0D\u80FD\u6302\u5230\u5176\u4ED6\u4EFB\u52A1\u6216\u9879\u76EE\u4E0B\u9762");
+  }
   index.tasks[child.path].parent = parent.path;
   const siblings = index.tasks[parent.path].children;
   if (!siblings.includes(child.path)) siblings.push(child.path);
   saveIndex(root, index);
+  if (entryKind(parent) === "project") syncProjectReadme(root, index, parent.path);
   const readmePath = path.join(root, child.path, "README.md");
   if (fs.existsSync(readmePath)) {
     let text = readText(readmePath);
@@ -21920,7 +22022,7 @@ function knowledgeSearch(root, keyword) {
 }
 
 // src/index.ts
-var server = new McpServer({ name: "opentask", version: "0.1.0" });
+var server = new McpServer({ name: "opentask", version: "0.2.0" });
 function ok(data) {
   return {
     content: [
@@ -21967,9 +22069,36 @@ function requireActive(ctx2) {
   }
   return resolveOne(ctx2, ctx2.config.active_task).task;
 }
+var STATUS_LABEL = {
+  active: "\u{1F7E1} \u8FDB\u884C\u4E2D",
+  paused: "\u23F8 \u6682\u505C",
+  done: "\u2705 \u5DF2\u5B8C\u6210"
+};
+function listTasksResult(c, tasks) {
+  return {
+    tasks: tasks.map((t, i) => ({
+      seq: i + 1,
+      title: t.name,
+      path: t.path,
+      created: t.created,
+      status: STATUS_LABEL[t.status],
+      is_active: c.config.active_task === t.path
+    })),
+    count: tasks.length,
+    hint: "\u7528\u6237\u9009\u62E9\u67D0\u6761\u540E\uFF0C\u8C03\u7528 task_open \u5E76\u4F20\u5BF9\u5E94 path \u5373\u53EF\u6253\u5F00\u3002"
+  };
+}
 function taskMeta(ctx2, task) {
+  const parentEntry = task.parent ? ctx2.index.tasks[task.parent] : void 0;
   return {
     task,
+    parent: parentEntry ? {
+      path: parentEntry.path,
+      name: parentEntry.name,
+      kind: entryKind(parentEntry),
+      goal: parentEntry.goal,
+      status: parentEntry.status
+    } : null,
     children: task.children.map((c) => ctx2.index.tasks[c]).filter((t) => Boolean(t)).map((t) => ({ path: t.path, goal: t.goal, status: t.status })),
     active_task: ctx2.config.active_task
   };
@@ -22020,25 +22149,39 @@ tool(
 );
 tool(
   "task_create",
-  "Create a task: YYYYMMDD-<name> directory (deduped with -2/-3), six templates with placeholders filled, active_task set, index and INDEX.md updated. Use for CreateTask.",
+  "Create a task: YYYYMMDD-<name> directory (deduped with -2/-3), six templates with placeholders filled, active_task set, index and INDEX.md updated. Optionally attach to a project. Use for CreateTask.",
   {
     root: rootSchema,
     name: external_exports.string().min(1).describe("Task name (used in the directory name)"),
     tags: external_exports.array(external_exports.string()).optional().describe("Space-separated tags"),
-    goal: external_exports.string().optional().describe("Concise goal; omitted -> '<\u5F85\u8865\u5145>' placeholder")
+    goal: external_exports.string().optional().describe("Concise goal; omitted -> '<\u5F85\u8865\u5145>' placeholder"),
+    project: external_exports.string().optional().describe("Attach the new task to this project (directory name or keyword)")
   },
   (args) => {
     const c = ctx(args);
+    let project;
+    const projRef = args.project?.trim();
+    if (projRef) {
+      const res = resolveTask(c.index, projRef);
+      if (res === null) throw new Error(`\u672A\u627E\u5230\u9879\u76EE "${projRef}"\u3002\u53EF\u7528 projectlist \u5217\u51FA\u3002`);
+      if (Array.isArray(res)) {
+        throw new Error(`"${projRef}" \u5339\u914D\u591A\u4E2A\u6761\u76EE: ${res.map((t) => t.path).join(", ")}\u3002\u8BF7\u7528\u7CBE\u786E\u76EE\u5F55\u540D\u3002`);
+      }
+      if (entryKind(res) !== "project") throw new Error(`"${res.path}" \u662F\u4EFB\u52A1\u4E0D\u662F\u9879\u76EE\uFF0C\u4E0D\u80FD\u4F5C\u4E3A\u5BB9\u5668\u3002`);
+      project = res;
+    }
     const created = createTask(
       c.root,
       c.config,
       args.name.trim(),
       args.tags ?? [],
-      args.goal ?? void 0
+      args.goal ?? void 0,
+      project
     );
     return {
       dir: created.dir,
       path: created.path,
+      project: project?.path ?? null,
       active_task: created.config.active_task,
       index: created.index
     };
@@ -22051,7 +22194,7 @@ tool(
   (args) => {
     const c = ctx(args);
     const kw = args.keyword;
-    const tasks = kw ? searchIndex(c.index, kw) : listRecent(c.index);
+    const tasks = kw ? searchIndex(c.index, kw) : listRecent(c.index, 5, "task");
     return {
       tasks: tasks.map((t) => ({
         path: t.path,
@@ -22064,6 +22207,90 @@ tool(
         updated: t.updated
       })),
       count: tasks.length
+    };
+  }
+);
+tool(
+  "tasklist",
+  "List the five most recent tasks (title + created date + status), newest first, for quick selection. After the user picks one, open it with task_open using the listed path. Use for TaskList / \u6700\u8FD1\u4EFB\u52A1 / \u4EFB\u52A1\u5217\u8868.",
+  { root: rootSchema },
+  (args) => {
+    const c = ctx(args);
+    return listTasksResult(c, listRecent(c.index, 5, "task"));
+  }
+);
+tool(
+  "taskall",
+  "List ALL tasks (title + created date + status), newest first, across the whole task root. After the user picks one, open it with task_open using the listed path. Use for TaskAll / \u6240\u6709\u4EFB\u52A1 / \u4EFB\u52A1\u5168\u5217\u8868.",
+  { root: rootSchema },
+  (args) => {
+    const c = ctx(args);
+    return listTasksResult(c, listAll(c.index, "task"));
+  }
+);
+tool(
+  "project_create",
+  "Create a project: YYYYMMDD-<name> directory with README/progress/decisions templates, kind=project index entry. Does NOT change active_task. Attach tasks via task_create(project=...) or task_link. Use for CreateProject / \u521B\u5EFA\u9879\u76EE.",
+  {
+    root: rootSchema,
+    name: external_exports.string().min(1).describe("Project name (used in the directory name)"),
+    goal: external_exports.string().min(1).describe("What this project is mainly about (ask the user if unknown)"),
+    tags: external_exports.array(external_exports.string()).optional().describe("Space-separated tags")
+  },
+  (args) => {
+    const c = ctx(args);
+    const created = createProject(
+      c.root,
+      c.config,
+      args.name.trim(),
+      args.goal.trim(),
+      args.tags ?? []
+    );
+    return { dir: created.dir, path: created.path, index: created.index };
+  }
+);
+tool(
+  "project_open",
+  "Open a project: return its entry, goal, each child task's status, and summary (README with auto task table, progress tail, decisions). Read-only: does not change active_task. Use for OpenProject / \u6253\u5F00\u9879\u76EE.",
+  { root: rootSchema, project: external_exports.string().min(1).describe("Project directory name or keyword") },
+  (args) => {
+    const c = ctx(args);
+    const res = resolveTask(c.index, args.project);
+    if (res === null) throw new Error(`\u672A\u627E\u5230\u9879\u76EE "${args.project}"\u3002\u53EF\u7528 projectlist \u5217\u51FA\u3002`);
+    if (Array.isArray(res)) {
+      throw new Error(
+        `"${args.project}" \u5339\u914D\u591A\u4E2A\u6761\u76EE: ${res.map((t) => t.path).join(", ")}\u3002\u8BF7\u7528\u7CBE\u786E\u76EE\u5F55\u540D\u3002`
+      );
+    }
+    if (entryKind(res) !== "project") {
+      throw new Error(`"${res.path}" \u662F\u4EFB\u52A1\u4E0D\u662F\u9879\u76EE\u3002\u7528 task_open \u6253\u5F00\u4EFB\u52A1\uFF0C\u6216\u7528 projectlist \u5217\u51FA\u9879\u76EE\u3002`);
+    }
+    const proj = c.index.tasks[res.path];
+    return {
+      task: proj,
+      children: proj.children.map((ch) => c.index.tasks[ch]).filter((t) => Boolean(t)).map((t) => ({ path: t.path, name: t.name, goal: t.goal, status: STATUS_LABEL[t.status] })),
+      summary: taskSummary(c.root, proj)
+    };
+  }
+);
+tool(
+  "projectlist",
+  "List the five most recent projects (title + created date + status + task count), newest first. After the user picks one, open it with project_open using the listed path. Use for ProjectList / \u9879\u76EE\u5217\u8868 / \u6700\u8FD1\u9879\u76EE.",
+  { root: rootSchema },
+  (args) => {
+    const c = ctx(args);
+    const projects = listRecent(c.index, 5, "project");
+    return {
+      projects: projects.map((t, i) => ({
+        seq: i + 1,
+        title: t.name,
+        path: t.path,
+        created: t.created,
+        status: STATUS_LABEL[t.status],
+        tasks: t.children.length
+      })),
+      count: projects.length,
+      hint: "\u7528\u6237\u9009\u62E9\u67D0\u6761\u540E\uFF0C\u8C03\u7528 project_open \u5E76\u4F20\u5BF9\u5E94 path \u5373\u53EF\u6253\u5F00\u3002"
     };
   }
 );
