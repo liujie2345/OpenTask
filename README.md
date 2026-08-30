@@ -15,6 +15,17 @@
 
 ---
 
+## English TL;DR
+
+**OpenTask** is a task-persistence system for AI coding agents, shipped as an **MCP server + OpenCode skill**. It stores every dev task's goal, progress, file changes, decisions and next steps as plain markdown on disk, so any new agent session resumes work instantly — no chat memory required.
+
+- 🗂 **Task lifecycle** — create / open / pause / resume / archive, with a JSON index kept in sync automatically
+- 📁 **Projects** — group related tasks; the agent reads cross-task coupling notes and shared decisions before touching common code
+- 🧠 **Knowledge base** — turn hard-won fixes into reusable, searchable entries
+- 🔍 **Instant search** — keyword queries over the index, no directory scanning
+- 📝 **Layered memory** — progress / changes / decisions / next / memory files with automatic monthly archiving
+- 🔌 **Standard stdio MCP** — works with OpenCode, Claude Code, Claude Desktop, Cursor, or any MCP client
+
 ## 这是什么
 
 OpenTask 是一套给 [OpenCode](https://opencode.ai) 用的**开发任务记忆系统**。它把每个任务的目标、进度、改动、决策、下一步全部落盘成结构化文件，并配一个 MCP 服务器管理索引与生命周期。AI 在任何新对话里读几个文件，就能恢复完整上下文继续干活。
@@ -84,6 +95,27 @@ cp command/*.md ~/.config/opencode/command/   # macOS / Linux
 ```
 
 重启 OpenCode，输入 `/` 就能看到：`/createtask`、`/opentask`、`/recordtask`、`/tasklist`、`/createproject`……
+
+### 🔌 在其他 MCP 客户端中使用
+
+OpenTask 是标准 stdio MCP 服务器，任何 MCP 客户端都能直接挂载（Skill 工作流是 OpenCode 特色的加分项，工具本身通用）：
+
+```bash
+# Claude Code
+claude mcp add opentask -- node /path/to/OpenTask/server/dist/index.js
+```
+
+```jsonc
+// Claude Desktop / Cursor (mcp.json)
+{
+  "mcpServers": {
+    "opentask": {
+      "command": "node",
+      "args": ["/path/to/OpenTask/server/dist/index.js"]
+    }
+  }
+}
+```
 
 ---
 
